@@ -1,0 +1,137 @@
+  
+ // ===========================================
+//           Shape Optimization
+// Energy disspation minimization: Unsteady Stokes flow
+//           Level Set Method
+//         NACA inverse problem
+// ===========================================
+//
+
+load "lapack" // For call matrix inverse
+// Label of the boundary.
+string caption;
+int inflow=44;
+int outflow=22;
+int wall=33; 
+int inter=11;
+int n0 = 25;
+int n2 = 10;
+int NN = 20;//10
+int iter;
+int N = 40;
+int iterinit;
+real CoefdJ=1.0;
+real mm=1.5;//Width of the channel
+real T  = 2.0;//2.5
+real dt = T/NN;
+real t;
+real mu=0.1; //Denote viscous coefficient
+real alpha=1000; //Darcy law coefficient
+real weak=0.0001;	//multiplicative coefficient for the "weak" material mimicking void
+real eps1=0.001;	//small parameter avoiding division by zero in the normal computation
+real TT=0.01;	//time step for the re-initialization
+real J;
+real tmp;
+real tmp2;
+real E0 = 0.02;
+real ds = 0.25;
+real lambda = 0.1;
+real scalep = 1e-3;
+// Define boundary
+real m=0.6;
+real mmm=0.5;
+border top(t=mmm/2.+1,-mmm/2.){x=t;y=m/2.;label=wall;};
+border down(t=-mmm/2.,mmm/2.+1){x=t;y=-m/2.;label=wall;};
+border left(t=m,0){x=-mmm/2.;y=-m/2.+t;label=inflow;};
+border right(t=0,m){x=mmm/2.+1.;y=-m/2+t;label=outflow;};
+
+// Define mesh
+mesh Th0=buildmesh(left(8*n0)+down(8*n0*mm)+right(8*n0)+top(8*n0*mm));
+
+//macro
+macro bilin(u1,u2,v1,v2) (dx(u1)*dx(v1)+dy(u1)*dy(v1)+dx(u2)*dx(v2)+dy(u2)*dy(v2)) // nabla u\cdot\nabla v
+macro grad(p) [dx(p),dy(p)]			// (grad p)
+macro div(u1,u2) (dx(u1)+dy(u2))		// (div u)
+//  H1 scalar product between vector-valued functions
+macro prodscal(t1,t2,p1,p2)
+	dx(t1)*dx(p1)+dy(t1)*dy(p1)+dx(t2)*dx(p2)+dy(t2)*dy(p2)+t1*p1+t2*p2//
+
+// func phi0=min(abs(y-0.25)-0.1,abs(y+0.25)-0.1,(x-mm/2)^2+y^2-0.3^2);
+
+// 
+func phi00 = - abs(y) + (13.0/12.0) * (0.17735*sqrt(max(x, 0.)) 
+                                - 0.075597*max(x, 0.) 
+                                - 0.212836*(max(x, 0.)^2) 
+                                + 0.17363*(max(x, 0.)^3) 
+                                - 0.06254*(max(x, 0.)^4));
+func phi01 = - ((x - 0.5)/0.5)^2 - (y/0.13)^2 + 1.0; 
+
+// Fespace
+fespace Vh0(Th0, P1b);
+Vh0 u01,u02,v01,v02,u01old,u02old;
+fespace Wh0(Th0, P1);
+Wh0 p0,q0;
+Wh0 phi0,X0,Xapprox0,Darcy0;
+Vh0[int] U01(NN),U02(NN);
+Wh0[int] P0(NN);
+
+u01 = 0;
+u02 = 0;
+phi0=phi01;
+tmp2 = int2d(Th0)(1.0);
+//phi0 = E0*tanh(phi0/E0);
+X0=(phi0<0); //characteristic function of the shape
+Xapprox0 = X0 + weak*(1-X0) ; //approximation of the shape characteristic function
+Darcy0 = alpha*(1-X0) ;// approximation of Darcy number
+plot(Xapprox0,fill=1,wait=1);
+cout<<"---------Refined---------"<<endl;
+
+// Implicit Euler scheme for unsteady Stokes
+for(int k=0;k<NN;k++)
+{
+
+u01old = u01;
+u02old = u02; 
+
+cout<<"--- State: t= "<<(k+1)*dt<<" ---"<<endl;
+solve UnsteadStokesEuler([u01,u02,p0],[v01,v02,q0],init=k)
+= int2d(Th0)( (u01*v01+u02*v02)/dt + mu*(bilin(u01,u02,v01,v02)) 
+            - p0*div(v01,v02) - q0*div(u01,u02) + Darcy0*(u01*v01+u02*v02) + p0*q0*1e-10)
+-int2d(Th0)( (u01old*v01+u02old*v02)/dt) 
++ on(inflow,outflow,u01=1,u02=0)
++ on(wall,u01=0,u02=0);
+
+plot([u01,u02],value=1,wait=1);
+// tmp = int2d(Th0)(p0);
+// p0 =  scalep*(p0-tmp/tmp2);
+U01[k] = u01; U02[k] = u02; P0[k]=p0;
+
+// for velocity
+ofstream ffuv("velcity"+k+".dat");
+ffuv<<"Variables="<<"X"<<","<<"Y"<<","<<"u"<<","<<"v"<<","<<"M"<<endl;
+ffuv<<"Zone"<<"   "<<"N="<<Th0.nv<<","<<"E="<<Th0.nt<<","<<"F=FEPOINT,ET=TRIANGLE"<<endl;
+
+
+// out put for domain 1 velocity, pressure temparature
+int i,j;
+//
+for( i=0;i<Th0.nv;i++)
+{
+//ffnt<<Th(i).x<<"   "<<Th(i).y<<"   "<<T(Th(i).x,Th(i).y)<<endl;
+ffuv<<Th0(i).x<<"   "<<Th0(i).y<<"   "<<u01(Th0(i).x,Th0(i).y)<<"   "<<u02(Th0(i).x,Th0(i).y)<<"     "<<sqrt(u01^2+u02^2)(Th0(i).x,Th0(i).y)<<endl;
+}
+//
+for(i=0;i<Th0.nt;i++)
+{
+for( j=0;j<3;j++)
+{
+//ffnt<<Th[i][j]+1<<"  ";
+ffuv<<Th0[i][j]+1<<"  ";
+}
+if(j==3)
+{
+//ffnt<<endl;
+ffuv<<endl;
+}
+}
+}

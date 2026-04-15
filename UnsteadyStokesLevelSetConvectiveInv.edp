@@ -1,0 +1,297 @@
+   
+ // ===========================================
+//           Shape Optimization
+// Energy disspation minimization: Unsteady Stokes flow
+//           Level Set Method
+// ===========================================
+//
+load "lapack" // For call matrix inverse
+load "iovtk"
+// Label of the boundary.
+int inflow=44;
+int outflow=22;
+int wall=33; 
+int inter=11;
+int n2 = 10;//parameter of number of units
+int NN = 4;
+int iter;
+int N = 30;
+int iterinit;
+real mm=1.5;//Width of the channel
+real T  = 1;
+real dt = T/NN;
+real t;
+real mu=0.1; //Denote viscous coefficient
+real alpha=1000; //Darcy law coefficient
+real weak=0.0001;	//multiplicative coefficient for the "weak" material mimicking void
+real eps1=0.001;	//small parameter avoiding division by zero in the normal computation
+real TT=0.01;	//time step for the re-initialization
+real lagrangestep =0.25; 
+real lagrange = 0.5;
+real VolTarg =0.75;
+real volume;
+real tmp;
+real tmp2;
+real E0 = 0.02;
+real ds = 0.25;
+real lambda = 0.1;
+real scalep = 1e-3;
+real obj;
+real volerr;
+real beta = 1e-5;
+//macro
+macro bilin(u1,u2,v1,v2) (dx(u1)*dx(v1)+dy(u1)*dy(v1)+dx(u2)*dx(v2)+dy(u2)*dy(v2)) // nabla u\cdot\nabla v
+macro grad(p) [dx(p),dy(p)]			// (grad p)
+macro div(u1,u2) (dx(u1)+dy(u2))		// (div u)
+//  H1 scalar product between vector-valued functions
+macro prodscal(t1,t2,p1,p2)
+	dx(t1)*dx(p1)+dy(t1)*dy(p1)+dx(t2)*dx(p2)+dy(t2)*dy(p2)+t1*p1+t2*p2//
+// Define boundary
+real m=0.6;
+real mmm=0.5;
+int n0 = 25;
+border top(t=mmm/2.+1,-mmm/2.){x=t;y=m/2.;label=wall;};
+border down(t=-mmm/2.,mmm/2.+1){x=t;y=-m/2.;label=wall;};
+border left(t=m,0){x=-mmm/2.;y=-m/2.+t;label=inflow;};
+border right(t=0,m){x=mmm/2.+1.;y=-m/2+t;label=outflow;};
+
+// Define mesh
+mesh Th0=buildmesh(left(10*n0)+down(10*n0*mm)+right(10*n0)+top(10*n0*mm));
+
+// func phi00 = - abs(y) + (13.0/12.0) * (0.17735*sqrt(max(x, 0.)) 
+//                                 - 0.075597*max(x, 0.) 
+//                                 - 0.212836*(max(x, 0.)^2) 
+//                                 + 0.17363*(max(x, 0.)^3) 
+//                                 - 0.06254*(max(x, 0.)^4));
+
+func phi00 = - ((x - 0.5)/0.4)^2 - (y/0.05)^2 + 1.0; 
+
+//func phi01 = - ((x - 0.5)/0.5)^2 - (y/0.11)^2 + 1.0; 
+
+func phi01 = - max( ((x - 0.5)/0.5)^2, (y/0.11)^2 ) + 1.0;
+
+// Fespace
+fespace Vh0(Th0, P1b);
+Vh0 u01,u02,v01,v02,u01old,u02old;
+fespace Wh0(Th0, P1);
+Wh0 p0,q0;
+Wh0 phi0,X0,Xapprox0,Darcy0;
+Vh0[int] U01(NN),U02(NN);
+Wh0[int] P0(NN);
+
+u01 = 0;
+u02 = 0;
+phi0=phi00;
+tmp2 = int2d(Th0)(1.0);
+//phi0 = E0*tanh(phi0/E0);
+X0=(phi0<0); //characteristic function of the shape
+Xapprox0 = X0 + weak*(1-X0) ; //approximation of the shape characteristic function
+Darcy0 = weak*X0+alpha*(1-X0) ;// approximation of Darcy number
+plot(Xapprox0,fill=1,value=1);
+savevtk("TrueHeavi.vtk", Th0, Xapprox0);
+cout<<"---------Refined---------"<<endl;
+
+// Implicit Euler scheme for unsteady Stokes
+for(int k=0;k<NN;k++)
+{
+
+u01old = u01;
+u02old = u02; 
+
+cout<<"--- State: t= "<<(k+1)*dt<<" ---"<<endl;
+solve UnsteadStokesEuler([u01,u02,p0],[v01,v02,q0],init=k)
+= int2d(Th0)( (u01*v01+u02*v02)/dt + mu*(bilin(u01,u02,v01,v02)) 
+            - p0*div(v01,v02) - q0*div(u01,u02) + Darcy0*(u01*v01+u02*v02) + p0*q0*1e-10)
+-int2d(Th0)( (u01old*v01+u02old*v02)/dt) 
++ on(inflow,outflow,u01=1,u02=0)
++ on(wall,u01=0,u02=0);
+
+plot([u01,u02],value=1,wait=0);
+tmp = int2d(Th0)(p0);
+p0 =  scalep*(p0-tmp/tmp2);
+U01[k] = u01; U02[k] = u02; P0[k]=p0;
+}
+
+// Define mesh
+mesh Th=buildmesh(left(8*n0)+down(8*n0*mm)+right(8*n0)+top(8*n0*mm));
+
+// Fespace
+fespace Vh(Th, P1b);
+Vh u1,u2,v1,v2,u1old,u2old,uu1,uu2,d1,d2;
+fespace Wh(Th, P1);
+Wh dp,p,q,pp;
+Wh N1, N2,phi,phim,nabla,S,M1,M2,phiinit,X,Xapprox,Darcy,psi,Heps,deltaeps;
+Wh dJDisDiv,dJDis11,dJDis12,dJDis21,dJDis22;
+Wh Vreg1, Vreg2, theta1, theta2;
+Wh h1=hTriangle;
+real hm=h1[].min; //maximal size of a mesh triangle
+Vh[int] U1(NN),U2(NN),V1(NN),V2(NN);
+Wh[int] P(NN),Q(NN);
+
+u1 = 0;
+u2 = 0;
+
+phi=phi01;
+
+///////////////////////////////////////////////
+// Loop of the gradient algorithm iterations //
+///////////////////////////////////////////////
+for (iter=1;iter< N;iter=iter+1)
+{	
+	phi = E0*tanh(phi/E0);
+	phim = phi;
+	Heps = ( (phim < -eps1) ) * 1.0 + ( (phim > eps1) ) * 0.0 + ( (abs(phim) <= eps1) ) * 0.5*(1 - phim/eps1 - sin(pi*phim/eps1)/pi);
+	X = Heps;
+	deltaeps = ( (abs(phim) <= eps1) ) * (-0.5/eps1)*(1 + cos(pi*phim/eps1)) + ( (abs(phim) > eps1) ) * 0.0;
+	Xapprox = X + weak*(1-X) ; //approximation of the shape characteristic function
+	Darcy = weak*X + alpha*(1-X) ;// approximation of Darcy number
+	volume = int2d(Th)(Heps);
+
+	if (iter==1)
+	{
+		savevtk("Heavi1.vtk", Th, Xapprox);
+	}
+	// Implicit Euler scheme for unsteady Stokes
+	u1 = 0; u2 = 0;
+	for(int i=0;i<T/dt;i++)
+	{
+	t=t+dt;
+
+	u1old = u1;
+	u2old = u2; 
+
+	solve UnsteadStokesEuler([u1,u2,p],[v1,v2,q],init=i)
+	= int2d(Th)( (u1*v1+u2*v2)/dt + mu*(bilin(u1,u2,v1,v2)) 
+				- p*div(v1,v2) - q*div(u1,u2) + Darcy*(u1*v1+u2*v2) + p*q*1e-10)
+	-int2d(Th)( (u1old*v1+u2old*v2)/dt) 
+	+ on(inflow,outflow,u1=1,u2=0)
+	+ on(wall,u1=0,u2=0);
+	
+	tmp = int2d(Th)(p);
+	p =  scalep*(p-tmp/tmp2);
+	U1[i] = u1; U2[i] = u2; P[i]=p;
+	}
+	obj = 0.0;//abs(volume-VolTarg);
+	for (int k=1;k<NN;k++)
+	{
+	obj = obj + int2d(Th)(dt*1/2*( (U1[k]-U01[k])^2 + (U2[k]-U02[k])^2 ) );
+	}
+	ofstream obj0("ObjLSM.txt", append);
+	obj0 << obj << endl;
+// for(int k=0;k<T/dt;k++)
+// {
+// // for velocity
+// ofstream ffuv("velcity"+k+".dat");
+// ffuv<<"Variables="<<"X"<<","<<"Y"<<","<<"u"<<","<<"v"<<","<<"M"<<endl;
+// ffuv<<"Zone"<<"   "<<"N="<<Th.nv<<","<<"E="<<Th.nt<<","<<"F=FEPOINT,ET=TRIANGLE"<<endl;
+
+
+// // out put for domain 1 velocity, pressure temparature
+// int i,j;
+// //
+// for( i=0;i<Th.nv;i++)
+// {
+// //ffnt<<Th(i).x<<"   "<<Th(i).y<<"   "<<T(Th(i).x,Th(i).y)<<endl;
+// ffuv<<Th(i).x<<"   "<<Th(i).y<<"   "<<U1[k](Th(i).x,Th(i).y)<<"   "<<U2[k](Th(i).x,Th(i).y)<<"     "<<sqrt(U1[k]^2+U2[k]^2)(Th(i).x,Th(i).y)<<endl;
+// }
+// //
+// for(i=0;i<Th.nt;i++)
+// {
+// for( j=0;j<3;j++)
+// {
+// //ffnt<<Th[i][j]+1<<"  ";
+// ffuv<<Th[i][j]+1<<"  ";
+// }
+// if(j==3)
+// {
+// //ffnt<<endl;
+// ffuv<<endl;
+// }
+// }
+// }
+
+	// Implicit Euler scheme for adjoint problem
+	u1old=0;u2old=0;
+	for(int i=0;i<T/dt;i++)
+	{
+	solve Adj([uu1,uu2,pp],[v1,v2,q],init=i)
+	= int2d(Th)( (uu1*v1+uu2*v2)/dt + mu*(bilin(uu1,uu2,v1,v2)) 
+				- pp*div(v1,v2) - q*div(uu1,uu2) + Darcy*(uu1*v1+uu2*v2) + pp*q*1e-10 )
+	-int2d(Th)( (u1old*v1+u2old*v2)/dt)
+	-int2d(Th)( (U1[NN-i-1] - U01[NN-i-1])*v1 + (U2[NN-i-1] - U02[NN-i-1])*v2 )
+	+on(inflow,outflow,inter,wall,uu1=0,uu2=0);
+	u1old =uu1;
+	u2old =uu2;
+	V1[NN-i-1] = uu1;
+	V2[NN-i-1] = uu2;
+
+	tmp = int2d(Th)(pp);
+	pp =  scalep*(pp-tmp/tmp2);
+	Q[NN-i-1] = pp;
+	}
+
+	dJDisDiv = dt*0.5*( (U1[0]-U01[0])^2 + (U2[0]-U02[0])^2 )
+			- dt*(V1[0]*U1[0]/dt + V2[0]*U2[0]/dt) 
+			- dt*Darcy*(U1[0]*V1[0]+U2[0]*V2[0]) 
+			- dt*mu*bilin(U1[0],U2[0],V1[0],V2[0]);
+	for (int k=1;k<NN;k++)
+	{
+	dJDisDiv = dJDisDiv + dt*0.5*( (U1[k]-U01[k])^2 + (U2[k]-U02[k])^2 )
+						- dt*(V1[k]*(U1[k]-U1[k-1])/dt + V2[k]*(U2[k]-U2[k-1])/dt)
+						- dt*Darcy*(U1[k]*V1[k]+U2[k]*V2[k]) 
+						- dt*mu*bilin(U1[k],U2[k],V1[k],V2[k]);
+	}
+
+	dJDis11 = 0;
+	dJDis12 = 0;
+	dJDis21 = 0;
+	dJDis22 = 0;
+	for (int k=0;k<NN;k++)
+	{
+	dJDis11 = dJDis11 + dt*mu*( 
+								+ dx(U1[k])*dx(V1[k]) + dx(U2[k])*dx(V2[k]) 
+								+ dx(V1[k])*dx(U1[k]) + dx(V2[k])*dx(U2[k]) )
+					- dt*P[k]*dx(V1[k]) - dt*Q[k]*dx(U1[k]);
+	dJDis12 = dJDis12 + dt*mu*(  
+								+ dx(U1[k])*dy(V1[k]) + dx(U2[k])*dy(V2[k]) 
+								+ dx(V1[k])*dy(U1[k]) + dx(V2[k])*dy(U2[k]) )
+					- dt*P[k]*dx(V2[k]) - dt*Q[k]*dx(U2[k]);
+	dJDis21 = dJDis21 + dt*mu*(  
+								+ dy(U1[k])*dx(V1[k]) + dy(U2[k])*dx(V2[k]) 
+								+ dy(V1[k])*dx(U1[k]) + dy(V2[k])*dx(U2[k]) )
+					- dt*P[k]*dy(V1[k]) - dt*Q[k]*dy(U1[k]);
+	dJDis22 = dJDis22 + dt*mu*( 
+								+ dy(U1[k])*dy(V1[k]) + dy(U2[k])*dy(V2[k]) 
+								+ dy(V1[k])*dy(U1[k]) + dy(V2[k])*dy(U2[k]) )
+				 	- dt*P[k]*dy(V2[k]) - dt*Q[k]*dy(U2[k]);
+	}
+
+	// Shape convection
+	nabla=(dx(phi))^2+(dy(phi))^2;
+	S=phi/(sqrt(phi^2+hm*hm*nabla)); //approximation of sign(phi)
+	M1=dx(phi)/(sqrt(nabla+eps1^2)); //approximation of the normal
+	M2=dy(phi)/(sqrt(nabla+eps1^2)); //approximation of the normal
+
+//  Get decent direction
+	solve smoothing ([Vreg1,Vreg2],[theta1,theta2])=
+	int2d(Th)( prodscal(Vreg1,Vreg2,theta1,theta2) ) 
+	+int2d(Th)(dJDisDiv*div(theta1,theta2) +dJDis11*dx(theta1)+dJDis12*dy(theta1) + dJDis21*dx(theta2)+dJDis22*dy(theta2))
+	+int2d(Th)( beta*(dx(M1)+dy(M2))*(theta1*M1+theta2*M2)*deltaeps*sqrt(nabla+eps1^2));
+
+
+	solve LevelSetEvolve(phi,psi) = int2d(Th)(phi*psi/ds+ 1e-4*grad(phi)'*grad(psi)) //
+	+ int2d(Th)(lambda*S*(M1*dx(phim)+M2*dy(phim) - (1- (phim/E0)^2) )*psi)
+	- int2d(Th)(convect([-Vreg1,-Vreg2],ds,phim)/ds*psi);
+	
+
+	string caption = "Iteration ="+iter+" objective = "+obj;
+	plot(X,fill=1,cmm=caption);
+}
+	obj = 0.0;//abs(volume-VolTarg);
+	for (int k=1;k<NN;k++)
+	{
+	obj = obj + int2d(Th)(dt*1/2*( (U1[k]-U01[k])^2 + (U2[k]-U02[k])^2 ) );
+	}
+	ofstream obj0("ObjLSM.txt", append);
+	obj0 << obj << endl;
+	savevtk("Heavi1.vtk", Th, Xapprox);
